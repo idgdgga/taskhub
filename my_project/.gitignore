@@ -1,10 +1,23 @@
 .venv/
+venv/
+env/
+.env/
 db.sqlite3
 staticfiles/
 .env
 !.env.example
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Local runtime logs and caches
+*.log
+logs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
 
 # 本地密钥（从 twitter_secrets.example.py 复制后填写）
 core/twitter_secrets.py

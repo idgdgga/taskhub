@@ -14,6 +14,8 @@ import os
 from decimal import Decimal
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -146,15 +148,7 @@ TASK_PENDING_APPLICATION_TIMEOUT_MINUTES = int(
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-# 生产环境务必设置环境变量 SECRET_KEY（勿提交到仓库）
-SECRET_KEY = os.environ.get(
-    "SECRET_KEY",
-    "django-insecure-=_n0^kny23gwp2c#w((viy8ceje73^5y=e#9=ql$-qr-571zmi",
-)
 
-# SECURITY WARNING: don't run with debug turned on in production!
-# 生产环境设置 DJANGO_DEBUG=0 或 false
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -162,7 +156,18 @@ def _env_bool(name: str, default: bool) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+# SECURITY WARNING: keep the secret key used in production secret!
+# 生产环境务必设置环境变量 SECRET_KEY（勿提交到仓库）
+SECRET_KEY = os.environ.get("SECRET_KEY", "").strip()
+
+# SECURITY WARNING: don't run with debug turned on in production!
+# 生产环境设置 DJANGO_DEBUG=0 或 false
 DEBUG = _env_bool("DJANGO_DEBUG", True)
+if not SECRET_KEY:
+    if DEBUG:
+        SECRET_KEY = "django-insecure-local-dev-only-replace-in-production"
+    else:
+        raise ImproperlyConfigured("SECRET_KEY must be set when DJANGO_DEBUG=0.")
 
 # 使用 HTTPS 域名访问时必填，逗号分隔，例如：https://api.example.com
 CSRF_TRUSTED_ORIGINS = [
@@ -182,6 +187,13 @@ ALLOWED_HOSTS = [
 if not DEBUG:
     SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
     USE_X_FORWARDED_HOST = True
+
+SECURE_SSL_REDIRECT = _env_bool("SECURE_SSL_REDIRECT", False)
+SESSION_COOKIE_SECURE = _env_bool("SESSION_COOKIE_SECURE", not DEBUG)
+CSRF_COOKIE_SECURE = _env_bool("CSRF_COOKIE_SECURE", not DEBUG)
+SECURE_HSTS_SECONDS = int(os.environ.get("SECURE_HSTS_SECONDS", "0"))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = _env_bool("SECURE_HSTS_INCLUDE_SUBDOMAINS", False)
+SECURE_HSTS_PRELOAD = _env_bool("SECURE_HSTS_PRELOAD", False)
 
 
 # Application definition
@@ -243,7 +255,7 @@ DATABASES = {
         "ENGINE": "django.db.backends.mysql",
         "NAME": os.environ.get("MYSQL_DATABASE", "my_base_db"),
         "USER": os.environ.get("MYSQL_USER", "root"),
-        "PASSWORD": os.environ.get("MYSQL_PASSWORD", "fqf20fqf"),
+        "PASSWORD": os.environ.get("MYSQL_PASSWORD", ""),
         "HOST": os.environ.get("MYSQL_HOST", "127.0.0.1"),
         "PORT": os.environ.get("MYSQL_PORT", "3306"),
         "OPTIONS": {
