@@ -312,6 +312,12 @@ PUBLIC_ENDPOINTS: tuple[PublicEndpoint, ...] = (
     ),
     PublicEndpoint(("GET",), "tasks/<int:task_id>/applications/", "发布人查看报名列表", True),
     PublicEndpoint(("PATCH", "POST"), "applications/<int:application_id>/", "发布人审核报名", True),
+    PublicEndpoint(
+        ("GET", "POST"),
+        "integrations/mobidea/postback/",
+        "Mobidea CPA 回调：click_id={{EXTERNAL_ID}}，校验 secret 后自动完成报名并发放任务奖励",
+        False,
+    ),
     PublicEndpoint(("GET",), "me/published-tasks/", "我发布的任务", True),
     PublicEndpoint(("GET",), "me/applied-tasks/", "我报名的任务", True),
     PublicEndpoint(

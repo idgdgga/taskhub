@@ -138,4 +138,9 @@ urlpatterns = [
     path("tasks/<int:task_id>/apply/", api_views.task_apply_api, name="taskhub-task-apply"),
     path("tasks/<int:task_id>/applications/", api_views.task_applications_api, name="taskhub-task-applications"),
     path("applications/<int:application_id>/", api_views.application_review_api, name="taskhub-application-review"),
+    path(
+        "integrations/mobidea/postback/",
+        api_views.mobidea_postback_api,
+        name="taskhub-mobidea-postback",
+    ),
 ]

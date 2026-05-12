@@ -57,6 +57,7 @@ class Task(models.Model):
     INTERACTION_EXTERNAL_VOTE = "external_vote"
     INTERACTION_JOIN_COMMUNITY = "join_community"
     INTERACTION_SCREENSHOT_PROOF = "screenshot_proof"
+    INTERACTION_CPA_OFFER = "cpa_offer"
     INTERACTION_CHOICES = (
         (INTERACTION_NONE, "无（不按下面规则校验）"),
         (INTERACTION_ACCOUNT_BINDING, "账号绑定（首页「绑定 Twitter/TikTok…」卡片）"),
@@ -68,6 +69,7 @@ class Task(models.Model):
         (INTERACTION_WATCH_VIDEO, "观看视频"),
         (INTERACTION_EXTERNAL_VOTE, "外部网页投票"),
         (INTERACTION_SCREENSHOT_PROOF, "上传截图审核"),
+        (INTERACTION_CPA_OFFER, "CPA 外部任务（Postback 自动确认）"),
     )
 
     BINDING_PLATFORM_NONE = ""
@@ -91,10 +93,12 @@ class Task(models.Model):
     VERIFY_USER_SELF = "user_self_confirm"
     VERIFY_PROFILE_LINK = "profile_link_proof"
     VERIFY_SCREENSHOT = "screenshot_review"
+    VERIFY_POSTBACK = "postback"
     VERIFY_CHOICES = (
         (VERIFY_USER_SELF, "用户自行确认完成"),
         (VERIFY_PROFILE_LINK, "简介/频道留指定链接证明"),
         (VERIFY_SCREENSHOT, "上传截图待审核"),
+        (VERIFY_POSTBACK, "第三方 Postback 自动确认"),
     )
 
     category = models.ForeignKey(
@@ -332,6 +336,8 @@ class Task(models.Model):
             self.INTERACTION_SCREENSHOT_PROOF,
         ):
             return self.VERIFY_SCREENSHOT
+        if self.interaction_type == self.INTERACTION_CPA_OFFER:
+            return self.VERIFY_POSTBACK
         return self.VERIFY_USER_SELF
 
 
@@ -376,6 +382,28 @@ class TaskApplication(models.Model):
         verbose_name="完成凭证截图",
         db_comment="看视频、外站投票等需截图审核时使用",
     )
+    external_provider = models.CharField(
+        max_length=32,
+        blank=True,
+        null=True,
+        db_index=True,
+        verbose_name="外部任务来源",
+        db_comment="如 mobidea；CPA/Postback 任务使用",
+    )
+    external_click_id = models.CharField(
+        max_length=128,
+        blank=True,
+        null=True,
+        unique=True,
+        verbose_name="外部点击 ID",
+        db_comment="传给第三方的唯一 click_id/pub_click_id，用于回调匹配报名",
+    )
+    external_started_at = models.DateTimeField(
+        blank=True,
+        null=True,
+        verbose_name="外部任务打开时间",
+        db_comment="用户领取后首次生成第三方跳转链接的时间",
+    )
     self_verified_at = models.DateTimeField(
         blank=True,
         null=True,
@@ -417,6 +445,94 @@ class TaskApplication(models.Model):
 
     def __str__(self):
         return f"{self.applicant.username} -> {self.task.title}"
+
+
+class MobideaConversion(models.Model):
+    STATUS_RECEIVED = "received"
+    STATUS_PROCESSED = "processed"
+    STATUS_DUPLICATE = "duplicate"
+    STATUS_REJECTED = "rejected"
+    STATUS_FAILED = "failed"
+    STATUS_CHOICES = (
+        (STATUS_RECEIVED, "已接收"),
+        (STATUS_PROCESSED, "已处理并发奖"),
+        (STATUS_DUPLICATE, "重复回调"),
+        (STATUS_REJECTED, "已拒绝"),
+        (STATUS_FAILED, "处理失败"),
+    )
+
+    task_application = models.ForeignKey(
+        TaskApplication,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="mobidea_conversions",
+        verbose_name="关联报名",
+        db_comment="通过 click_id 匹配到的 TaskApplication",
+    )
+    click_id = models.CharField(
+        max_length=128,
+        unique=True,
+        verbose_name="Click ID",
+        db_comment="Mobidea 回传的 {{EXTERNAL_ID}} / pub_click_id",
+    )
+    offer_id = models.CharField(
+        max_length=64,
+        blank=True,
+        null=True,
+        verbose_name="Mobidea Offer ID",
+        db_comment="Mobidea offer_id",
+    )
+    payout = models.DecimalField(
+        max_digits=12,
+        decimal_places=4,
+        blank=True,
+        null=True,
+        verbose_name="Mobidea 收益",
+        db_comment="Mobidea 回传的 {{MONEY}}",
+    )
+    currency = models.CharField(
+        max_length=12,
+        default="CNY",
+        verbose_name="币种",
+        db_comment="Mobidea payout 币种",
+    )
+    raw_payload = models.JSONField(
+        default=dict,
+        blank=True,
+        verbose_name="原始回调",
+        db_comment="Mobidea postback 参数",
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=STATUS_RECEIVED,
+        verbose_name="处理状态",
+        db_comment="Mobidea 回调处理状态",
+    )
+    message = models.CharField(
+        max_length=255,
+        blank=True,
+        null=True,
+        verbose_name="处理说明",
+        db_comment="错误或重复说明",
+    )
+    received_at = models.DateTimeField(auto_now_add=True, verbose_name="接收时间", db_comment="回调接收时间")
+    processed_at = models.DateTimeField(
+        blank=True,
+        null=True,
+        verbose_name="处理时间",
+        db_comment="处理完成时间",
+    )
+
+    class Meta:
+        db_table = "taskhub_mobidea_conversion"
+        verbose_name = "Mobidea 转化回调"
+        verbose_name_plural = verbose_name
+        ordering = ("-received_at",)
+
+    def __str__(self):
+        return self.click_id
 
 
 class TaskCompletionRecord(TaskApplication):

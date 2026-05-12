@@ -1,4 +1,5 @@
 import json
+import hmac
 import os
 from datetime import datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
@@ -17,7 +18,8 @@ from django.views.decorators.http import require_http_methods
 from users.models import FrontendUser
 from wallets.models import Wallet
 
-from .models import ApiToken, MembershipLevelConfig, Task, TaskApplication, TaskCategory
+from .models import ApiToken, MembershipLevelConfig, MobideaConversion, Task, TaskApplication, TaskCategory
+from .mobidea import PROVIDER as MOBIDEA_PROVIDER, ensure_action_url, is_mobidea_task, parse_click_id
 from .platform_publisher import get_task_platform_publisher, is_platform_publisher
 from .task_lifecycle import (
     active_taker_count,
@@ -1048,6 +1050,28 @@ def serialize_application(application, request=None):
     }
 
 
+def _mobidea_apply_payload(application: TaskApplication, request=None) -> dict:
+    data = serialize_application(application, request)
+    action_url = ensure_action_url(application)
+    data["external_provider"] = MOBIDEA_PROVIDER
+    data["external_click_id"] = application.external_click_id
+    data["external_action_url"] = action_url
+    data["verification_reference_url"] = action_url
+    data["verification_share_url"] = action_url
+    return {
+        "application": data,
+        "external_provider": MOBIDEA_PROVIDER,
+        "external_action_url": action_url,
+        "verification_reference_url": action_url,
+    }
+
+
+def _serialize_apply_payload(application: TaskApplication, request=None) -> dict:
+    if hasattr(application, "task") and is_mobidea_task(application.task):
+        return _mobidea_apply_payload(application, request)
+    return {"application": serialize_application(application, request)}
+
+
 # —— 任务记录页（Mini App「任务记录」Tab）——
 # `record_status` 分类与列表 annotate 的 Case/When 顺序须一致，勿单独改一半。
 RECORD_TAB_ALL = "all"
@@ -1845,7 +1869,7 @@ def _task_apply_sync_pending_application(request, task, existing, body, bound_us
         existing.save(update_fields=update_fields)
     application = TaskApplication.objects.select_related("task", "applicant").get(pk=existing.pk)
     return api_response(
-        {"application": serialize_application(application, request)},
+        _serialize_apply_payload(application, request),
         message="已报名（信息已同步，可直接进行校验步骤）",
     )
 
@@ -2043,7 +2067,7 @@ def task_apply_api(request, task_id):
 
     maybe_mark_task_completed_when_slots_full(task_id)
     application = TaskApplication.objects.select_related("task", "applicant").get(pk=new_application_id)
-    return api_response({"application": serialize_application(application, request)}, message="报名成功")
+    return api_response(_serialize_apply_payload(application, request), message="报名成功")
 
 
 @csrf_exempt
@@ -2064,6 +2088,194 @@ def task_applications_api(request, task_id):
     )
     return api_response(
         {"items": [serialize_application(item, request) for item in applications]}
+    )
+
+
+def _request_payload_dict(request) -> dict:
+    payload = {}
+    if request.content_type and "json" in request.content_type.lower() and request.body:
+        try:
+            body = json.loads(request.body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            body = {}
+        if isinstance(body, dict):
+            for key, value in body.items():
+                payload[str(key)] = "" if value is None else str(value)
+    for source in (request.GET, request.POST):
+        for key in source:
+            payload[key] = source.get(key, "")
+    return payload
+
+
+def _first_payload_value(payload: dict, *keys: str) -> str:
+    for key in keys:
+        value = str(payload.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _optional_decimal(value: str) -> Decimal | None:
+    if not value:
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError):
+        return None
+
+
+def _mobidea_postback_secret_valid(request, payload: dict) -> bool:
+    expected = (getattr(settings, "MOBIDEA_POSTBACK_SECRET", "") or "").strip()
+    if not expected:
+        return bool(settings.DEBUG)
+    received = (
+        request.headers.get("X-Mobidea-Secret", "")
+        or request.headers.get("X-Postback-Secret", "")
+        or payload.get("secret", "")
+        or payload.get("postback_secret", "")
+    )
+    return hmac.compare_digest(str(received).strip(), expected)
+
+
+def _record_rejected_mobidea_postback(click_id: str, payload: dict, message: str) -> None:
+    if not click_id:
+        return
+    try:
+        conversion, created = MobideaConversion.objects.get_or_create(
+            click_id=click_id,
+            defaults={
+                "raw_payload": payload,
+                "status": MobideaConversion.STATUS_REJECTED,
+                "message": message[:255],
+                "processed_at": timezone.now(),
+            },
+        )
+        if not created and conversion.status != MobideaConversion.STATUS_PROCESSED:
+            conversion.raw_payload = payload
+            conversion.status = MobideaConversion.STATUS_REJECTED
+            conversion.message = message[:255]
+            conversion.processed_at = timezone.now()
+            conversion.save(update_fields=["raw_payload", "status", "message", "processed_at"])
+    except OperationalError:
+        pass
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+def mobidea_postback_api(request):
+    payload = _request_payload_dict(request)
+    if not _mobidea_postback_secret_valid(request, payload):
+        return api_error("Mobidea postback secret 校验失败或未配置", code=4500, status=403)
+
+    click_id = _first_payload_value(payload, "click_id", "pub_click_id", "external_id", "EXTERNAL_ID")
+    if not click_id:
+        return api_error("缺少 click_id", code=4501, status=400)
+
+    application_id = parse_click_id(click_id)
+    if not application_id:
+        _record_rejected_mobidea_postback(click_id, payload, "invalid click_id signature")
+        return api_error("click_id 无效", code=4502, status=400)
+
+    offer_id = _first_payload_value(payload, "offer_id", "app_id", "campaign_id")
+    payout = _optional_decimal(_first_payload_value(payload, "money", "payout", "revenue", "MONEY"))
+    currency = _first_payload_value(payload, "currency", "payout_currency") or "CNY"
+    last_granted = {"granted": False, "usdt": "0", "th_coin": "0"}
+
+    try:
+        with transaction.atomic():
+            application = (
+                TaskApplication.objects.select_for_update()
+                .select_related("task", "applicant")
+                .get(pk=application_id)
+            )
+            if not is_mobidea_task(application.task):
+                _record_rejected_mobidea_postback(click_id, payload, "application is not a mobidea task")
+                return api_error("报名记录不是 Mobidea 任务", code=4503, status=400)
+            if not offer_id:
+                offer_id = str((application.task.interaction_config or {}).get("mobidea_offer_id") or "").strip()
+
+            try:
+                conversion = MobideaConversion.objects.select_for_update().get(click_id=click_id)
+                created = False
+            except MobideaConversion.DoesNotExist:
+                conversion = MobideaConversion.objects.create(
+                    click_id=click_id,
+                    task_application=application,
+                    offer_id=offer_id or None,
+                    payout=payout,
+                    currency=currency[:12],
+                    raw_payload=payload,
+                )
+                created = True
+
+            if not created and conversion.status == MobideaConversion.STATUS_PROCESSED:
+                return api_response(
+                    {
+                        "processed": False,
+                        "duplicate": True,
+                        "application_id": conversion.task_application_id,
+                    },
+                    message="Mobidea 回调已处理，已跳过重复发奖",
+                )
+
+            if application.external_provider != MOBIDEA_PROVIDER or application.external_click_id != click_id:
+                application.external_provider = MOBIDEA_PROVIDER
+                application.external_click_id = click_id
+                if not application.external_started_at:
+                    application.external_started_at = timezone.now()
+                application.save(
+                    update_fields=[
+                        "external_provider",
+                        "external_click_id",
+                        "external_started_at",
+                        "updated_at",
+                    ]
+                )
+
+            if application.status != TaskApplication.STATUS_ACCEPTED:
+                _auto_accept_after_binding_verify(application)
+            last_granted = grant_task_completion_reward(application)
+
+            conversion.task_application = application
+            conversion.offer_id = offer_id or conversion.offer_id
+            conversion.payout = payout if payout is not None else conversion.payout
+            conversion.currency = currency[:12]
+            conversion.raw_payload = payload
+            conversion.status = MobideaConversion.STATUS_PROCESSED
+            conversion.message = "ok"
+            conversion.processed_at = timezone.now()
+            conversion.save(
+                update_fields=[
+                    "task_application",
+                    "offer_id",
+                    "payout",
+                    "currency",
+                    "raw_payload",
+                    "status",
+                    "message",
+                    "processed_at",
+                ]
+            )
+
+            def _notify_completion():
+                app = TaskApplication.objects.select_related("task", "applicant").get(pk=application_id)
+                send_task_completion_message(app, last_granted)
+
+            transaction.on_commit(_notify_completion)
+    except TaskApplication.DoesNotExist:
+        _record_rejected_mobidea_postback(click_id, payload, "application not found")
+        return api_error("报名记录不存在", code=4504, status=404)
+    except OperationalError:
+        return api_error("系统繁忙，请稍后重试", code=4505, status=500)
+
+    return api_response(
+        {
+            "processed": True,
+            "duplicate": False,
+            "application_id": application_id,
+            "last_granted": last_granted,
+        },
+        message="Mobidea 回调已处理",
     )
 
 

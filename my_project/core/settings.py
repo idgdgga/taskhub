@@ -118,6 +118,10 @@ try:
 except ImportError:
     pass
 
+# Mobidea：CPA 任务 postback 校验 secret 与默认 site
+MOBIDEA_POSTBACK_SECRET = os.environ.get("MOBIDEA_POSTBACK_SECRET", "").strip()
+MOBIDEA_DEFAULT_SITE = os.environ.get("MOBIDEA_DEFAULT_SITE", "taskhub").strip() or "taskhub"
+
 # 已迁移至后台「签到参数配置」中的 weekly_makeup_limit；保留变量仅为兼容旧文档/脚本（新逻辑不再读取）
 CHECK_IN_MAKEUPS_PER_WEEK = int(os.environ.get("CHECK_IN_MAKEUPS_PER_WEEK", "3"))
 
